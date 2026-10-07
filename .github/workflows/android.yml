@@ -41,15 +41,14 @@ jobs:
           mkdir -p ../app/src/main/jniLibs
           cargo ndk -t arm64-v8a -t x86_64 -o ../app/src/main/jniLibs build --release
 
-      - name: Gradle
-        run: |
-          curl -fsSL https://services.gradle.org/distributions/gradle-9.4.1-bin.zip -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /tmp/gradle
-          /tmp/gradle/gradle-9.4.1/bin/gradle wrapper --gradle-version 9.4.1
-          chmod +x gradlew
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.4.1"
+          cache-provider: basic
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
