@@ -48,9 +48,18 @@ jobs:
           cache-provider: basic
 
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+        shell: bash
+        run: |
+          set +e
+          gradle assembleDebug --stacktrace 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          exit $status
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: flen-img-debug-apks
-          path: app/build/outputs/apk/debug/*.apk
+          name: flen-img-build-debug
+          path: |
+            build.log
+            app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
