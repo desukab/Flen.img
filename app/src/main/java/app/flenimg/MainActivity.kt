@@ -27,6 +27,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AppHolder.context = applicationContext
+        if (checkSelfPermission(TERMUX_RUN_COMMAND_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(TERMUX_RUN_COMMAND_PERMISSION), 7001)
+        }
         setContent { FlenApp() }
     }
 }
