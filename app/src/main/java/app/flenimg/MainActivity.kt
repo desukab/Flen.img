@@ -1,8 +1,12 @@
 package app.flenimg
 
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,14 +44,18 @@ private fun FlenApp() {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Flen.img", style = MaterialTheme.typography.headlineLarge)
             Text("Fast local image & video enhancement", style = MaterialTheme.typography.titleMedium)
+
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Input", style = MaterialTheme.typography.titleLarge)
-                    OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text(if (input == null) "Choose image / video" else "Change file") }
+                    OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }) {
+                        Text(if (input == null) "Choose image / video" else "Change file")
+                    }
                     Text(input?.toString() ?: "No local file selected")
                     TextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("Or paste a media URL") }, singleLine = true)
                 }
             }
+
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Enhancement", style = MaterialTheme.typography.titleLarge)
@@ -61,8 +70,11 @@ private fun FlenApp() {
                     TextField(effects, { effects = it }, Modifier.fillMaxWidth(), label = { Text("Effects") }, singleLine = true)
                 }
             }
+
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { status = EngineBridge.start(input, url, target, preset, mode, effects) }, Modifier.weight(1f)) { Text("Enhance") }
+                Button(onClick = {
+                    status = EngineBridge.start(input, url, target, preset, mode, effects)
+                }, Modifier.weight(1f)) { Text("Enhance") }
                 OutlinedButton(onClick = { status = EngineBridge.doctor() }, Modifier.weight(1f)) { Text("Device check") }
             }
             Text(status)
@@ -79,34 +91,79 @@ private val presets = listOf(
 )
 
 private object EngineBridge {
+    private const val OUTPUT_DIR = "/storage/emulated/0/Download/Flen.img/outputs"
+
     private fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
+
     fun start(input: Uri?, url: String, target: String, preset: String, mode: String, effects: String): String {
-        val command = buildString {
-            append("python -m aitmeral ")
-            if (url.isNotBlank()) append("url ").append(quote(url)).append(" ")
-            else if (input != null) append("convert ").append(quote(input.toString())).append(" ")
-            else return "Choose a file or enter a URL."
-            append("-S ").append(quote(target)).append(" ")
-            append("-p ").append(quote(preset)).append(" ")
-            append("--mode ").append(quote(mode)).append(" ")
-            if (effects.isNotBlank()) append("--effects ").append(quote(effects)).append(" ")
+        return try {
+            val source = if (url.isNotBlank()) {
+                "url " + quote(url)
+            } else if (input != null) {
+                quote(prepareInput(input))
+            } else {
+                return "Choose a file or enter a URL."
+            }
+
+            val command = buildString {
+                append("mkdir -p ").append(quote(OUTPUT_DIR)).append(" && ")
+                append("python -m aitmeral ")
+                append(if (url.isNotBlank()) "url " else "convert ")
+                append(source.substringAfter(if (url.isNotBlank()) "url " else "convert "))
+                append(" -o ").append(quote(OUTPUT_DIR))
+                append(" -S ").append(quote(target))
+                append(" -p ").append(quote(preset))
+                append(" --mode ").append(quote(mode))
+                if (effects.isNotBlank()) append(" --effects ").append(quote(effects))
+            }
+            TermuxRunner.run(command)
+        } catch (e: Exception) {
+            "Could not prepare input: " + (e.message ?: "unknown error")
         }
-        return TermuxRunner.run(command)
     }
+
     fun doctor() = TermuxRunner.run("python -m aitmeral doctor")
+
+    private fun prepareInput(uri: Uri): String {
+        val resolver = AppHolder.context.contentResolver
+        val original = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else "input.bin"
+        } ?: "input.bin"
+        val safe = original.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val name = System.currentTimeMillis().toString() + "_" + safe
+        val relative = "Download/Flen.img/input/"
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, name)
+            put(MediaStore.Downloads.MIME_TYPE, resolver.getType(uri) ?: "application/octet-stream")
+            put(MediaStore.Downloads.RELATIVE_PATH, relative)
+        }
+        val out = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("Unable to create shared input file")
+        resolver.openInputStream(uri).use { source ->
+            resolver.openOutputStream(out).use { sink ->
+                requireNotNull(source)
+                requireNotNull(sink)
+                source.copyTo(sink, 1024 * 1024)
+            }
+        }
+        return "/storage/emulated/0/$relative$name"
+    }
 }
+
 private object TermuxRunner {
     fun run(command: String): String = try {
-        val intent = Intent("com.termux.app.RUN_COMMAND").apply {
-            setPackage("com.termux")
+        val intent = Intent("com.termux.RUN_COMMAND").apply {
+            setClassName("com.termux", "com.termux.app.RunCommandService")
             putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
             putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
+            putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
             putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
         }
-        AppHolder.context.sendBroadcast(intent)
-        "Job submitted. Processing continues in the background."
+        AppHolder.context.startService(intent)
+        "Job submitted. Output: Download/Flen.img/outputs"
     } catch (error: Exception) {
         "Local processing backend unavailable: " + (error.message ?: "unknown error")
     }
 }
+
 private object AppHolder { lateinit var context: android.content.Context }
