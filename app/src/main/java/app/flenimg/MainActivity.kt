@@ -4,9 +4,10 @@ import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Settings
+import android.content.pm.PackageManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,7 +19,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import java.io.File
+
+private const val TERMUX_PACKAGE = "com.termux"
+private const val TERMUX_RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,6 +41,7 @@ private fun FlenApp() {
     var url by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Ready") }
     var expanded by remember { mutableStateOf(false) }
+    var setup by remember { mutableStateOf(TermuxRunner.setupState()) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { input = it }
 
     MaterialTheme {
@@ -45,13 +49,30 @@ private fun FlenApp() {
             Text("Flen.img", style = MaterialTheme.typography.headlineLarge)
             Text("Fast local image & video enhancement", style = MaterialTheme.typography.titleMedium)
 
+            if (!setup.ready) {
+                Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("One-time setup required", style = MaterialTheme.typography.titleLarge)
+                        Text(setup.message)
+                        Button(onClick = {
+                            TermuxRunner.openAppPermissions()
+                            setup = TermuxRunner.setupState()
+                        }) { Text("Enable processing") }
+                        Text(
+                            "This is only for the development runtime. The final app will not require a terminal app.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Input", style = MaterialTheme.typography.titleLarge)
                     OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }) {
                         Text(if (input == null) "Choose image / video" else "Change file")
                     }
-                    Text(input?.toString() ?: "No local file selected")
+                    Text(input?.let { "Selected media" } ?: "No local file selected")
                     TextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("Or paste a media URL") }, singleLine = true)
                 }
             }
@@ -72,10 +93,15 @@ private fun FlenApp() {
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = {
-                    status = EngineBridge.start(input, url, target, preset, mode, effects)
-                }, Modifier.weight(1f)) { Text("Enhance") }
-                OutlinedButton(onClick = { status = EngineBridge.doctor() }, Modifier.weight(1f)) { Text("Device check") }
+                Button(
+                    enabled = setup.ready,
+                    onClick = { status = EngineBridge.start(input, url, target, preset, mode, effects) },
+                    Modifier.weight(1f)
+                ) { Text("Enhance") }
+                OutlinedButton(onClick = {
+                    status = TermuxRunner.doctor()
+                    setup = TermuxRunner.setupState()
+                }, Modifier.weight(1f)) { Text("Device check") }
             }
             Text(status)
             Text("Local-first. Hardware acceleration is used when available.", style = MaterialTheme.typography.bodySmall)
@@ -92,7 +118,6 @@ private val presets = listOf(
 
 private object EngineBridge {
     private const val OUTPUT_DIR = "/storage/emulated/0/Download/Flen.img/outputs"
-
     private fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
 
     fun start(input: Uri?, url: String, target: String, preset: String, mode: String, effects: String): String {
@@ -100,16 +125,13 @@ private object EngineBridge {
             val source = if (url.isNotBlank()) {
                 "url " + quote(url)
             } else if (input != null) {
-                quote(prepareInput(input))
+                "convert " + quote(prepareInput(input))
             } else {
                 return "Choose a file or enter a URL."
             }
-
             val command = buildString {
                 append("mkdir -p ").append(quote(OUTPUT_DIR)).append(" && ")
-                append("python -m aitmeral ")
-                append(if (url.isNotBlank()) "url " else "convert ")
-                append(source.substringAfter(if (url.isNotBlank()) "url " else "convert "))
+                append("python -m aitmeral ").append(source)
                 append(" -o ").append(quote(OUTPUT_DIR))
                 append(" -S ").append(quote(target))
                 append(" -p ").append(quote(preset))
@@ -121,8 +143,6 @@ private object EngineBridge {
             "Could not prepare input: " + (e.message ?: "unknown error")
         }
     }
-
-    fun doctor() = TermuxRunner.run("python -m aitmeral doctor")
 
     private fun prepareInput(uri: Uri): String {
         val resolver = AppHolder.context.contentResolver
@@ -150,20 +170,49 @@ private object EngineBridge {
     }
 }
 
+private data class SetupState(val ready: Boolean, val message: String)
+
 private object TermuxRunner {
-    fun run(command: String): String = try {
-        val intent = Intent("com.termux.RUN_COMMAND").apply {
-            setClassName("com.termux", "com.termux.app.RunCommandService")
-            putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-            putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
-            putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
-            putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
+    fun setupState(): SetupState {
+        val pm = AppHolder.context.packageManager
+        val termuxInstalled = try { pm.getPackageInfo(TERMUX_PACKAGE, 0); true } catch (_: Exception) { false }
+        if (!termuxInstalled) {
+            return SetupState(false, "The local processing runtime is not installed on this device.")
         }
-        AppHolder.context.startService(intent)
-        "Job submitted. Output: Download/Flen.img/outputs"
-    } catch (error: Exception) {
-        "Local processing backend unavailable: " + (error.message ?: "unknown error")
+        val permission = AppHolder.context.checkSelfPermission(TERMUX_RUN_COMMAND_PERMISSION)
+        if (permission != PackageManager.PERMISSION_GRANTED) {
+            return SetupState(false, "Android is blocking the local processing bridge. Grant Flen.img “Run commands in Termux environment” in App info → Permissions → Additional permissions.")
+        }
+        return SetupState(true, "Ready")
     }
+
+    fun openAppPermissions() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:" + AppHolder.context.packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        AppHolder.context.startActivity(intent)
+    }
+
+    fun run(command: String): String {
+        val state = setupState()
+        if (!state.ready) return state.message
+        return try {
+            val intent = Intent("com.termux.RUN_COMMAND").apply {
+                setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
+                putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
+                putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
+                putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
+                putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
+            }
+            AppHolder.context.startService(intent)
+            "Job submitted. Output: Download/Flen.img/outputs"
+        } catch (error: Exception) {
+            "Processing could not start: " + (error.message ?: "unknown error")
+        }
+    }
+
+    fun doctor() = run("python -m aitmeral doctor")
 }
 
 private object AppHolder { lateinit var context: android.content.Context }
