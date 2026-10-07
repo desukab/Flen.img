@@ -99,7 +99,7 @@ private fun FlenApp() {
                 Button(
                     enabled = setup.ready,
                     onClick = { status = EngineBridge.start(input, url, target, preset, mode, effects) },
-                    Modifier.weight(1f)
+                    modifier = Modifier.weight(1f)
                 ) { Text("Enhance") }
                 OutlinedButton(onClick = {
                     status = TermuxRunner.doctor()
